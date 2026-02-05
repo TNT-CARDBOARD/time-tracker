@@ -12,41 +12,42 @@
 #include <sstream>
 #include <algorithm>
 #include <set>
+#include <mutex>
 
 using namespace std;
 const char CYPHER_KEY = 'X';
 const string SAVE_FILE = "system_data.dat";
 
-// черный список
+// Black list
 set<string> BLACKLIST = { "SearchApp", "svchost", "csrss", "System", "Idle", "Registry", "smss" };
 
-// структура данных
+//data structure
 struct AppStats {
     long long totalSeconds = 0;
     bool isVisible = true;
 };
 
 map<string, AppStats> trackerData;
+mutex dataMutex;
 bool isTracking = true;
 
-// шифрование/расшифровка строк (XOR)
+//string encryption/decryption (XOR)
 string Cipher(string data) {
     string output = data;
-    for (int i = 0; i < data.size(); i++)
+    for (int i = 0; i < (int)data.size(); i++)
         output[i] = data[i] ^ CYPHER_KEY;
     return output;
 }
 
-// добавление в реестр
+//adding to the reg
 void SetAutoStart(bool enable) {
     HKEY hKey;
-    const char* czExePath = "ProvidenceTracker.exe";
     char pPath[MAX_PATH];
     GetModuleFileNameA(NULL, pPath, MAX_PATH);
 
     if (RegOpenKeyExA(HKEY_CURRENT_USER, "Software\\Microsoft\\Windows\\CurrentVersion\\Run", 0, KEY_SET_VALUE, &hKey) == ERROR_SUCCESS) {
         if (enable) {
-            RegSetValueExA(hKey, "ProvidenceTracker", 0, REG_SZ, (const BYTE*)pPath, strlen(pPath) + 1);
+            RegSetValueExA(hKey, "ProvidenceTracker", 0, REG_SZ, (const BYTE*)pPath, (DWORD)(strlen(pPath) + 1));
             cout << "[SYSTEM]: Added to AutoStart successfully." << endl;
         }
         else {
@@ -57,8 +58,9 @@ void SetAutoStart(bool enable) {
     }
 }
 
-// сохранение данных (зашифрованное)
+//save data (encrypted)
 void SaveData() {
+    lock_guard<mutex> lock(dataMutex);
     ofstream file(SAVE_FILE, ios::binary);
     if (file.is_open()) {
         for (auto const& [name, stats] : trackerData) {
@@ -70,13 +72,14 @@ void SaveData() {
     }
 }
 
-// загрузка данных
+//LoadData
 void LoadData() {
+    lock_guard<mutex> lock(dataMutex);
     ifstream file(SAVE_FILE, ios::binary);
     if (file.is_open()) {
         stringstream buffer;
         buffer << file.rdbuf();
-        string content = Cipher(buffer.str()); // расшифровка
+        string content = Cipher(buffer.str());
 
         stringstream ss(content);
         string line;
@@ -108,6 +111,7 @@ string GetActiveWindowName() {
             CloseHandle(hProcess);
             string name = string(buffer);
             size_t lastindex = name.find_last_of(".");
+            if (lastindex == string::npos) return name;
             return name.substr(0, lastindex);
         }
         CloseHandle(hProcess);
@@ -116,16 +120,16 @@ string GetActiveWindowName() {
 }
 
 void TrackerLoop() {
+    int saveTimer = 0;
     while (isTracking) {
         string currentApp = GetActiveWindowName();
 
-        // фильтр говна и пустых имен
         if (currentApp.length() > 0 && BLACKLIST.find(currentApp) == BLACKLIST.end()) {
+            lock_guard<mutex> lock(dataMutex);
             trackerData[currentApp].totalSeconds++;
         }
 
-        // автосохрнение каждые 30 сек
-        static int saveTimer = 0;
+        //autosave
         if (++saveTimer > 30) {
             SaveData();
             saveTimer = 0;
@@ -135,7 +139,7 @@ void TrackerLoop() {
     }
 }
 
-// ИНТЕРФЕЙС
+//INTERFACE
 
 void ClearScreen() {
     system("cls");
@@ -143,7 +147,7 @@ void ClearScreen() {
 
 void PrintHeader() {
     cout << "=========================================" << endl;
-    cout << "          PROVIDENCE TRACKER v1          " << endl;
+    cout << "          PROVIDENCE TRACKER v1.2        " << endl;
     cout << "=========================================" << endl;
 }
 
@@ -153,36 +157,24 @@ void ShowStats() {
     cout << "APP NAME\t\tTIME (Min)\tSTATUS" << endl;
     cout << "------------------------------------------" << endl;
 
-    for (auto const& [name, stats] : trackerData) {
-        if (stats.totalSeconds > 60) {
-            string visibility = stats.isVisible ? "[VISIBLE]" : "[HIDDEN]";
-            cout << name << "\t\t" << (stats.totalSeconds / 60) << " m\t" << visibility << endl;
+    {
+        lock_guard<mutex> lock(dataMutex);
+        for (auto const& [name, stats] : trackerData) {
+            if (stats.totalSeconds > 60) {
+                string visibility = stats.isVisible ? "[VISIBLE]" : "[HIDDEN]";
+                cout << name << "\t\t" << (stats.totalSeconds / 60) << " m\t" << visibility << endl;
+            }
         }
     }
-    cout << "\n[PRESS ENTER TO RETURN]";
-    cin.ignore(); cin.get();
-}
 
-void ToggleVisibility() {
-    ClearScreen();
-    PrintHeader();
-    cout << "Enter App Name to Hide/Unhide: ";
-    string target;
-    cin >> target;
-    if (trackerData.find(target) != trackerData.end()) {
-        trackerData[target].isVisible = !trackerData[target].isVisible;
-        cout << "Visibility changed for " << target << endl;
-        SaveData();
-    }
-    else {
-        cout << "App not found in history." << endl;
-    }
-    this_thread::sleep_for(chrono::seconds(1));
+    cout << "\n[PRESS ENTER TO RETURN]";
+    cin.ignore();
+    cin.get();
 }
 
 int main() {
     SetConsoleTitleA("Providence Core");
-    system("color 0A"); // цвет
+    system("color 0A");
 
     LoadData();
     thread trackerThread(TrackerLoop);
@@ -195,15 +187,29 @@ int main() {
         cout << "1. Show My Stats" << endl;
         cout << "2. Enable AutoStart" << endl;
         cout << "3. Disable AutoStart" << endl;
-        cout << "4. Exit (Tracker keeps running)" << endl;
+        cout << "4. Go to Background" << endl;
         cout << ">> ";
-        cin >> choice;
+
+        if (!(cin >> choice)) {
+            cin.clear();
+            cin.ignore(10000, '\n');
+            continue;
+        }
 
         switch (choice) {
         case 1: ShowStats(); break;
         case 2: SetAutoStart(true); break;
         case 3: SetAutoStart(false); break;
-        case 4: return 0;
+        case 4:
+            cout << "[SYSTEM]: Process detaching from console..." << endl;
+            this_thread::sleep_for(chrono::seconds(1));
+
+            FreeConsole();
+
+            while (true) {
+                this_thread::sleep_for(chrono::hours(24));
+            }
+            return 0;
         default: break;
         }
     }
