@@ -12,7 +12,6 @@
 #include <sstream>
 #include <algorithm>
 #include <set>
-#include <mutex>
 
 using namespace std;
 const char CYPHER_KEY = 'X';
@@ -28,7 +27,6 @@ struct AppStats {
 };
 
 map<string, AppStats> trackerData;
-mutex dataMutex;
 bool isTracking = true;
 
 // шифрование/расшифровка строк (XOR)
@@ -48,7 +46,7 @@ void SetAutoStart(bool enable) {
 
     if (RegOpenKeyExA(HKEY_CURRENT_USER, "Software\\Microsoft\\Windows\\CurrentVersion\\Run", 0, KEY_SET_VALUE, &hKey) == ERROR_SUCCESS) {
         if (enable) {
-            RegSetValueExA(hKey, "ProvidenceTracker", 0, REG_SZ, (const BYTE*)pPath, (DWORD)(strlen(pPath) + 1));
+            RegSetValueExA(hKey, "ProvidenceTracker", 0, REG_SZ, (const BYTE*)pPath, strlen(pPath) + 1);
             cout << "[SYSTEM]: Added to AutoStart successfully." << endl;
         }
         else {
@@ -61,7 +59,6 @@ void SetAutoStart(bool enable) {
 
 // сохранение данных (зашифрованное)
 void SaveData() {
-    lock_guard<mutex> lock(dataMutex);
     ofstream file(SAVE_FILE, ios::binary);
     if (file.is_open()) {
         for (auto const& [name, stats] : trackerData) {
@@ -75,7 +72,6 @@ void SaveData() {
 
 // загрузка данных
 void LoadData() {
-    lock_guard<mutex> lock(dataMutex);
     ifstream file(SAVE_FILE, ios::binary);
     if (file.is_open()) {
         stringstream buffer;
@@ -112,7 +108,6 @@ string GetActiveWindowName() {
             CloseHandle(hProcess);
             string name = string(buffer);
             size_t lastindex = name.find_last_of(".");
-            if (lastindex == string::npos) return name;
             return name.substr(0, lastindex);
         }
         CloseHandle(hProcess);
@@ -121,17 +116,16 @@ string GetActiveWindowName() {
 }
 
 void TrackerLoop() {
-    static int saveTimer = 0;
     while (isTracking) {
         string currentApp = GetActiveWindowName();
 
         // фильтр говна и пустых имен
         if (currentApp.length() > 0 && BLACKLIST.find(currentApp) == BLACKLIST.end()) {
-            lock_guard<mutex> lock(dataMutex);
             trackerData[currentApp].totalSeconds++;
         }
 
         // автосохрнение каждые 30 сек
+        static int saveTimer = 0;
         if (++saveTimer > 30) {
             SaveData();
             saveTimer = 0;
@@ -149,7 +143,7 @@ void ClearScreen() {
 
 void PrintHeader() {
     cout << "=========================================" << endl;
-    cout << "          PROVIDENCE TRACKER v1.1        " << endl;
+    cout << "          PROVIDENCE TRACKER v1          " << endl;
     cout << "=========================================" << endl;
 }
 
@@ -159,20 +153,14 @@ void ShowStats() {
     cout << "APP NAME\t\tTIME (Min)\tSTATUS" << endl;
     cout << "------------------------------------------" << endl;
 
-    {
-        lock_guard<mutex> lock(dataMutex);
-        for (auto const& [name, stats] : trackerData) {
-            if (stats.totalSeconds > 60) {
-                string visibility = stats.isVisible ? "[VISIBLE]" : "[HIDDEN]";
-                cout << name << "\t\t" << (stats.totalSeconds / 60) << " m\t" << visibility << endl;
-            }
+    for (auto const& [name, stats] : trackerData) {
+        if (stats.totalSeconds > 60) {
+            string visibility = stats.isVisible ? "[VISIBLE]" : "[HIDDEN]";
+            cout << name << "\t\t" << (stats.totalSeconds / 60) << " m\t" << visibility << endl;
         }
     }
-
     cout << "\n[PRESS ENTER TO RETURN]";
-    cin.ignore();
-    if (cin.rdbuf()->in_avail()) cin.get();
-    cin.get();
+    cin.ignore(); cin.get();
 }
 
 void ToggleVisibility() {
@@ -181,12 +169,10 @@ void ToggleVisibility() {
     cout << "Enter App Name to Hide/Unhide: ";
     string target;
     cin >> target;
-
-    lock_guard<mutex> lock(dataMutex);
     if (trackerData.find(target) != trackerData.end()) {
         trackerData[target].isVisible = !trackerData[target].isVisible;
         cout << "Visibility changed for " << target << endl;
-        // SaveData(); // таймер сохранит сам, если раскоментить - сохраняет мгновенно
+        SaveData();
     }
     else {
         cout << "App not found in history." << endl;
@@ -209,28 +195,15 @@ int main() {
         cout << "1. Show My Stats" << endl;
         cout << "2. Enable AutoStart" << endl;
         cout << "3. Disable AutoStart" << endl;
-        cout << "4. Exit (Hide & Keep Running)" << endl;
+        cout << "4. Exit (Tracker keeps running)" << endl;
         cout << ">> ";
-
-        // защита от дибила
-        if (!(cin >> choice)) {
-            cin.clear();
-            cin.ignore(10000, '\n');
-            continue;
-        }
+        cin >> choice;
 
         switch (choice) {
         case 1: ShowStats(); break;
         case 2: SetAutoStart(true); break;
         case 3: SetAutoStart(false); break;
-        case 4:
-            cout << "[SYSTEM]: Hiding console in 2 seconds..." << endl;
-            this_thread::sleep_for(chrono::seconds(2));
-            ShowWindow(GetConsoleWindow(), SW_HIDE);
-            while (true) {
-                this_thread::sleep_for(chrono::hours(24));
-            }
-            break;
+        case 4: return 0;
         default: break;
         }
     }
